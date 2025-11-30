@@ -1,0 +1,382 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 会社
+model Company {
+  id                    String    @id @default(cuid())
+  name                  String    // 会社名
+  googleChatWebhookUrl  String?   // Google Chat Webhook URL
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // リレーション
+  users         User[]
+  invitations   Invitation[]
+  socialLinks   CompanySocialLink[] // 会社のSNSリンク
+
+  @@index([name])
+}
+
+// ユーザー（社員・担当者）
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  password      String
+  title         String?   // 肩書
+  photoUrl      String?   // 写真URL
+  comment       String?   @db.Text // コメント
+  phone         String?   // 電話番号（SMS通知用）
+  googleCalendarEmbedUrl String? // Googleカレンダー埋め込みURL
+  role          UserRole  @default(STAFF)
+  companyId     String?   // 所属会社ID
+  isCompanyAdmin Boolean  @default(false) // 会社管理者かどうか
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // リレーション
+  company            Company?         @relation(fields: [companyId], references: [id])
+  accounts           Account[]
+  bookingLinks       BookingLink[]
+  bookings           Booking[]
+  workingHours       WorkingHours[]
+  holidays           Holiday[]
+  notificationLogs   NotificationLog[]
+  assignmentRules    AssignmentRule[]
+  sentInvitations    Invitation[]     @relation("InvitationSender")
+  bookingLinkMembers BookingLinkMember[] // 参加している予約リンク
+
+  @@index([email])
+  @@index([companyId])
+}
+
+enum UserRole {
+  ADMIN
+  STAFF
+}
+
+// 招待
+model Invitation {
+  id            String           @id @default(cuid())
+  companyId     String
+  email         String           // 招待先メールアドレス
+  token         String           @unique // 招待トークン
+  invitedBy     String           // 招待者のユーザーID
+  status        InvitationStatus @default(PENDING)
+  expiresAt     DateTime         // 有効期限
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  // リレーション
+  company       Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  inviter       User             @relation("InvitationSender", fields: [invitedBy], references: [id])
+
+  @@index([companyId])
+  @@index([email])
+  @@index([token])
+  @@index([status])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+}
+
+// 外部認証アカウント（Googleなど）
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// 予約リンク
+model BookingLink {
+  id                String              @id @default(cuid())
+  userId            String
+  title             String              // 例: 面接、商談、相談
+  slug              String              @unique // URL用のスラッグ
+  description       String?             @db.Text
+  duration          Int                 // 面談の長さ（分）
+  meetingType       MeetingType         // 対面 or オンライン
+  allowBothTypes    Boolean             @default(false) // 両方選択可能か
+  advanceNotice     Int                 // 受付期限（分前まで）例: 60 = 1時間前まで
+  bufferTime        Int                 @default(0) // 予約間の間隔（分）
+  isActive          Boolean             @default(true)
+  customMessage     String?             @db.Text // カスタムメッセージ
+  notificationMethod NotificationMethod @default(BOTH)
+  formTitle         String?             // カスタムフォームのタイトル
+  bookingCondition  BookingCondition    @default(ALL) // 予約条件（全員 or 誰か1人）
+  roundRobinEnabled Boolean             @default(false) // ラウンドロビン有効化
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  // リレーション
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings            Booking[]
+  formFields          FormField[]
+  socialLinks         SocialLink[]
+  members             BookingLinkMember[]   // 参加メンバー
+
+  @@index([userId])
+  @@index([slug])
+}
+
+// 予約リンクの参加メンバー（中間テーブル）
+model BookingLinkMember {
+  id              String          @id @default(cuid())
+  bookingLinkId   String
+  userId          String
+  role            MemberRole      @default(VIEWER)
+  createdAt       DateTime        @default(now())
+
+  // リレーション
+  bookingLink     BookingLink     @relation(fields: [bookingLinkId], references: [id], onDelete: Cascade)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingLinkId, userId]) // 同じ予約リンクに同じユーザーを重複登録させない
+  @@index([bookingLinkId])
+  @@index([userId])
+}
+
+enum BookingCondition {
+  ALL  // 全メンバーが参加できる日程
+  ANY  // 誰か1人が参加できる日程
+}
+
+enum MemberRole {
+  OWNER   // オーナー（管理権限あり）
+  VIEWER  // 閲覧者（閲覧のみ）
+}
+
+enum MeetingType {
+  ONLINE
+  OFFLINE
+  BOTH
+}
+
+enum NotificationMethod {
+  EMAIL
+  SMS
+  BOTH
+}
+
+// カスタムフォームフィールド
+model FormField {
+  id              String      @id @default(cuid())
+  bookingLinkId   String
+  label           String
+  fieldType       FieldType
+  required        Boolean     @default(false)
+  options         String[]    // セレクトボックスなどの選択肢
+  order           Int
+  createdAt       DateTime    @default(now())
+
+  bookingLink     BookingLink @relation(fields: [bookingLinkId], references: [id], onDelete: Cascade)
+  responses       FormResponse[]
+
+  @@index([bookingLinkId])
+}
+
+enum FieldType {
+  TEXT
+  TEXTAREA
+  EMAIL
+  PHONE
+  SELECT
+  RADIO
+  CHECKBOX
+}
+
+// SNSリンク
+model SocialLink {
+  id              String      @id @default(cuid())
+  bookingLinkId   String
+  platform        SocialPlatform
+  url             String
+  createdAt       DateTime    @default(now())
+
+  bookingLink     BookingLink @relation(fields: [bookingLinkId], references: [id], onDelete: Cascade)
+
+  @@index([bookingLinkId])
+}
+
+enum SocialPlatform {
+  INSTAGRAM
+  FACEBOOK
+  X
+  TIKTOK
+  YOUTUBE
+  LINKEDIN
+  LINE
+  WEBSITE
+}
+
+// 会社のSNSリンク
+model CompanySocialLink {
+  id        String         @id @default(cuid())
+  companyId String
+  platform  SocialPlatform
+  url       String
+  createdAt DateTime       @default(now())
+
+  company   Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, platform]) // 同一会社・同一プラットフォームは1件のみ
+  @@index([companyId])
+}
+
+// 予約
+model Booking {
+  id                String        @id @default(cuid())
+  bookingLinkId     String
+  userId            String        // 担当者
+  guestName         String        // 予約者名
+  guestEmail        String        // 予約者メール
+  guestPhone        String        // 予約者電話番号
+  startTime         DateTime
+  endTime           DateTime
+  meetingType       MeetingType   // 対面 or オンライン
+  meetingUrl        String?       // Google Meet URL
+  location          String?       // 対面の場合の場所
+  status            BookingStatus @default(CONFIRMED)
+  cancelReason      String?       @db.Text
+  googleEventId     String?       // GoogleカレンダーのイベントID
+  notes             String?       @db.Text // フォーム回答などのメモ
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  // リレーション
+  bookingLink       BookingLink   @relation(fields: [bookingLinkId], references: [id])
+  user              User          @relation(fields: [userId], references: [id])
+  formResponses     FormResponse[]
+  notifications     NotificationLog[]
+
+  @@index([bookingLinkId])
+  @@index([userId])
+  @@index([startTime])
+  @@index([guestEmail])
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+// フォーム回答
+model FormResponse {
+  id          String    @id @default(cuid())
+  bookingId   String
+  formFieldId String
+  value       String    @db.Text
+  createdAt   DateTime  @default(now())
+
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  formField   FormField @relation(fields: [formFieldId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([formFieldId])
+}
+
+// 稼働時間設定
+model WorkingHours {
+  id          String    @id @default(cuid())
+  userId      String
+  dayOfWeek   Int       // 0 = 日曜, 1 = 月曜, ... 6 = 土曜
+  startTime   String    // HH:mm形式 例: "09:00"
+  endTime     String    // HH:mm形式 例: "18:00"
+  isAvailable Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// 休暇・休日設定
+model Holiday {
+  id          String    @id @default(cuid())
+  userId      String
+  date        DateTime  // 休暇の日付
+  reason      String?   // 理由
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([date])
+}
+
+// 通知ログ
+model NotificationLog {
+  id              String            @id @default(cuid())
+  bookingId       String
+  userId          String
+  type            NotificationType
+  method          NotificationMethod
+  recipient       String            // 送信先（メールアドレスまたは電話番号）
+  status          NotificationStatus
+  errorMessage    String?           @db.Text
+  sentAt          DateTime?
+  createdAt       DateTime          @default(now())
+
+  booking         Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user            User              @relation(fields: [userId], references: [id])
+
+  @@index([bookingId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum NotificationType {
+  BOOKING_CREATED
+  BOOKING_CANCELLED
+  BOOKING_REMINDER
+  BOOKING_UPDATED
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// 担当者自動割り当てルール
+model AssignmentRule {
+  id              String            @id @default(cuid())
+  userId          String
+  priority        Int               @default(0) // 優先度（低い方が優先）
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([priority])
+}
