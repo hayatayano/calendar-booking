@@ -27,6 +27,8 @@ COPY . .
 # 環境変数（ビルド時）
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+# メモリ不足エラーを防ぐためにヒープサイズを増加
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Next.jsをビルド
 RUN npm run build
