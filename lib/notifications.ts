@@ -3,11 +3,57 @@ import { Twilio } from 'twilio'
 import { prisma } from './prisma'
 import { NotificationMethod, NotificationType, NotificationStatus } from '@prisma/client'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
-const twilioClient = new Twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-)
+// ビルド時にはAPIキーがないため、遅延初期化する
+const getResend = () => {
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('RESEND_API_KEY is not set')
+    return null
+  }
+  return new Resend(process.env.RESEND_API_KEY)
+}
+
+const getTwilioClient = () => {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+    console.warn('Twilio credentials are not set')
+    return null
+  }
+  return new Twilio(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  )
+}
+
+// 遅延初期化用のキャッシュ
+let resendInstance: Resend | null = null
+let twilioInstance: Twilio | null = null
+
+const resend = {
+  emails: {
+    send: async (params: Parameters<Resend['emails']['send']>[0]) => {
+      if (!resendInstance) {
+        resendInstance = getResend()
+      }
+      if (!resendInstance) {
+        throw new Error('Resend is not configured')
+      }
+      return resendInstance.emails.send(params)
+    }
+  }
+}
+
+const twilioClient = {
+  messages: {
+    create: async (params: { body: string; from: string | undefined; to: string }) => {
+      if (!twilioInstance) {
+        twilioInstance = getTwilioClient()
+      }
+      if (!twilioInstance) {
+        throw new Error('Twilio is not configured')
+      }
+      return twilioInstance.messages.create(params)
+    }
+  }
+}
 
 /**
  * 予約確認メールを送信
