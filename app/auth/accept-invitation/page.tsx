@@ -1,10 +1,11 @@
 'use client'
 
 import { useSearchParams, useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
 import { signIn } from 'next-auth/react'
 
-export default function AcceptInvitationPage() {
+// useSearchParamsを使用するコンポーネントを分離
+function AcceptInvitationContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const token = searchParams.get('token')
@@ -192,5 +193,21 @@ export default function AcceptInvitationPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// メインページコンポーネント - Suspenseでラップ
+export default function AcceptInvitationPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-gray-600 text-sm">読み込み中...</p>
+        </div>
+      </div>
+    }>
+      <AcceptInvitationContent />
+    </Suspense>
   )
 }
