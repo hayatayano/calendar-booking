@@ -27,8 +27,16 @@ COPY . .
 # 環境変数（ビルド時）
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
-# メモリ不足エラーを防ぐためにヒープサイズを増加
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+# メモリ不足エラーを防ぐためにヒープサイズを増加（8GB）
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+
+# ビルド時に必要なダミー環境変数（実行時にSecret Managerから上書きされる）
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+ENV NEXTAUTH_SECRET="dummy-secret-for-build-only"
+ENV NEXTAUTH_URL="http://localhost:3000"
+ENV RESEND_API_KEY="re_dummy_key_for_build"
+ENV TWILIO_ACCOUNT_SID="dummy_sid"
+ENV TWILIO_AUTH_TOKEN="dummy_token"
 
 # Next.jsをビルド
 RUN npm run build
