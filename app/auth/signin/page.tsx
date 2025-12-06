@@ -2,8 +2,10 @@
 
 import { signIn } from 'next-auth/react'
 import { useSearchParams, useRouter } from 'next/navigation'
+import { Suspense } from 'react'
 
-export default function SignInPage() {
+// useSearchParamsを使用するコンポーネントを分離
+function SignInContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const callbackUrl = searchParams.get('callbackUrl') || '/home'
@@ -129,5 +131,21 @@ export default function SignInPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// メインページコンポーネント - Suspenseでラップ
+export default function SignInPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-gray-600 text-sm">読み込み中...</p>
+        </div>
+      </div>
+    }>
+      <SignInContent />
+    </Suspense>
   )
 }

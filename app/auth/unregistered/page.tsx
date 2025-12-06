@@ -2,9 +2,10 @@
 
 import { signIn } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 
-export default function UnregisteredPage() {
+// useSearchParamsを使用するコンポーネントを分離
+function UnregisteredContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [isRegistering, setIsRegistering] = useState(false)
@@ -162,5 +163,21 @@ export default function UnregisteredPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// メインページコンポーネント - Suspenseでラップ
+export default function UnregisteredPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-gray-600 text-sm">読み込み中...</p>
+        </div>
+      </div>
+    }>
+      <UnregisteredContent />
+    </Suspense>
   )
 }
