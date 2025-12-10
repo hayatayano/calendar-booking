@@ -37,6 +37,7 @@ export default function BookingsPage() {
   const [checkingAvailability, setCheckingAvailability] = useState(false)
   const [availabilityResults, setAvailabilityResults] = useState<any[]>([])
   const [creatingBooking, setCreatingBooking] = useState(false)
+  const [timeSlotWarnings, setTimeSlotWarnings] = useState<string[]>([])
 
   useEffect(() => {
     fetchBookings()
@@ -192,18 +193,23 @@ export default function BookingsPage() {
     setShowManualBookingModal(true)
   }
 
-  // 空き時間チェック
-  const checkAvailability = async () => {
-    if (!manualBookingForm.startTime || manualBookingForm.assignedUserIds.length === 0) {
-      setManualBookingErrors(['日時と担当者を選択してください'])
+  // 空き時間チェック（自動・手動両方で使用）
+  const checkAvailabilityForUsers = async (startTimeStr: string, userIds: string[], showAsWarning: boolean = false) => {
+    if (!startTimeStr || userIds.length === 0) {
+      if (!showAsWarning) {
+        setManualBookingErrors(['日時と担当者を選択してください'])
+      }
       return
     }
 
     setCheckingAvailability(true)
-    setManualBookingErrors([])
+    if (!showAsWarning) {
+      setManualBookingErrors([])
+    }
+    setTimeSlotWarnings([])
 
     try {
-      const startTime = new Date(manualBookingForm.startTime)
+      const startTime = new Date(startTimeStr)
       const endTime = new Date(startTime.getTime() + 60 * 60000) // 1時間後
 
       const response = await fetch('/api/bookings/manual', {
@@ -212,7 +218,7 @@ export default function BookingsPage() {
         body: JSON.stringify({
           startTime: startTime.toISOString(),
           endTime: endTime.toISOString(),
-          userIds: manualBookingForm.assignedUserIds,
+          userIds: userIds,
         }),
       })
 
@@ -222,16 +228,67 @@ export default function BookingsPage() {
         setAvailabilityResults(data.results)
         if (!data.allAvailable) {
           const unavailable = data.results.filter((r: any) => !r.available)
-          setManualBookingErrors(unavailable.map((r: any) => `${r.userName}: ${r.reason}`))
+          const messages = unavailable.map((r: any) => `${r.userName}: ${r.reason}`)
+          if (showAsWarning) {
+            setTimeSlotWarnings(messages)
+          } else {
+            setManualBookingErrors(messages)
+          }
+        } else {
+          setTimeSlotWarnings([])
         }
       } else {
-        setManualBookingErrors([data.error])
+        if (showAsWarning) {
+          setTimeSlotWarnings([data.error])
+        } else {
+          setManualBookingErrors([data.error])
+        }
       }
     } catch (error) {
       console.error('Failed to check availability:', error)
-      setManualBookingErrors(['空き時間の確認に失敗しました'])
+      if (showAsWarning) {
+        setTimeSlotWarnings(['空き時間の確認に失敗しました'])
+      } else {
+        setManualBookingErrors(['空き時間の確認に失敗しました'])
+      }
     } finally {
       setCheckingAvailability(false)
+    }
+  }
+
+  // 空き時間チェック（ボタンクリック用）
+  const checkAvailability = async () => {
+    await checkAvailabilityForUsers(manualBookingForm.startTime, manualBookingForm.assignedUserIds, false)
+  }
+
+  // 日時変更時の自動チェック
+  const handleStartTimeChange = async (newStartTime: string) => {
+    setManualBookingForm(prev => ({ ...prev, startTime: newStartTime }))
+    setAvailabilityResults([])
+    setTimeSlotWarnings([])
+    
+    // ユーザーが既に選択されている場合は自動チェック
+    if (manualBookingForm.assignedUserIds.length > 0 && newStartTime) {
+      await checkAvailabilityForUsers(newStartTime, manualBookingForm.assignedUserIds, true)
+    }
+  }
+
+  // 担当者選択変更時の自動チェック
+  const handleUserSelectionChange = async (userId: string) => {
+    const newUserIds = manualBookingForm.assignedUserIds.includes(userId)
+      ? manualBookingForm.assignedUserIds.filter(id => id !== userId)
+      : [...manualBookingForm.assignedUserIds, userId]
+    
+    setManualBookingForm(prev => ({
+      ...prev,
+      assignedUserIds: newUserIds
+    }))
+    setAvailabilityResults([])
+    setTimeSlotWarnings([])
+    
+    // 日時が既に選択されている場合は自動チェック
+    if (manualBookingForm.startTime && newUserIds.length > 0) {
+      await checkAvailabilityForUsers(manualBookingForm.startTime, newUserIds, true)
     }
   }
 
@@ -297,16 +354,9 @@ export default function BookingsPage() {
     }
   }
 
-  // 担当者選択のトグル
+  // 担当者選択のトグル（handleUserSelectionChangeを使用）
   const toggleUserSelection = (userId: string) => {
-    setManualBookingForm(prev => ({
-      ...prev,
-      assignedUserIds: prev.assignedUserIds.includes(userId)
-        ? prev.assignedUserIds.filter(id => id !== userId)
-        : [...prev.assignedUserIds, userId]
-    }))
-    // 選択が変わったら空き時間結果をリセット
-    setAvailabilityResults([])
+    handleUserSelectionChange(userId)
   }
 
   return (
@@ -794,13 +844,26 @@ export default function BookingsPage() {
                   <input
                     type="datetime-local"
                     value={manualBookingForm.startTime}
-                    onChange={(e) => {
-                      setManualBookingForm({ ...manualBookingForm, startTime: e.target.value })
-                      setAvailabilityResults([])
-                    }}
+                    onChange={(e) => handleStartTimeChange(e.target.value)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                   />
                   <p className="text-xs text-gray-500 mt-1">※ 予約時間は1時間です</p>
+                  
+                  {/* 日時選択後の警告メッセージ */}
+                  {timeSlotWarnings.length > 0 && (
+                    <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                      <ul className="text-sm text-red-600 space-y-1">
+                        {timeSlotWarnings.map((warning, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                            <span>{warning}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
 
                 {/* 面談相手の氏名 */}
