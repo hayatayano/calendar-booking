@@ -20,6 +20,23 @@ export default function BookingsPage() {
   })
   const [companyMembers, setCompanyMembers] = useState<any[]>([])
   const [saving, setSaving] = useState(false)
+  
+  // 手動予約モーダル用のstate
+  const [showManualBookingModal, setShowManualBookingModal] = useState(false)
+  const [manualBookingForm, setManualBookingForm] = useState({
+    startTime: '',
+    guestName: '',
+    guestEmail: '',
+    guestPhone: '',
+    meetingType: 'ONLINE' as 'ONLINE' | 'OFFLINE',
+    location: '',
+    notes: '',
+    assignedUserIds: [] as string[],
+  })
+  const [manualBookingErrors, setManualBookingErrors] = useState<string[]>([])
+  const [checkingAvailability, setCheckingAvailability] = useState(false)
+  const [availabilityResults, setAvailabilityResults] = useState<any[]>([])
+  const [creatingBooking, setCreatingBooking] = useState(false)
 
   useEffect(() => {
     fetchBookings()
@@ -153,6 +170,145 @@ export default function BookingsPage() {
     )
   }
 
+  // 手動予約モーダルを開く
+  const openManualBookingModal = () => {
+    // 現在時刻の1時間後を初期値に
+    const now = new Date()
+    now.setHours(now.getHours() + 1)
+    now.setMinutes(0, 0, 0)
+    
+    setManualBookingForm({
+      startTime: format(now, "yyyy-MM-dd'T'HH:mm"),
+      guestName: '',
+      guestEmail: '',
+      guestPhone: '',
+      meetingType: 'ONLINE',
+      location: '',
+      notes: '',
+      assignedUserIds: [],
+    })
+    setManualBookingErrors([])
+    setAvailabilityResults([])
+    setShowManualBookingModal(true)
+  }
+
+  // 空き時間チェック
+  const checkAvailability = async () => {
+    if (!manualBookingForm.startTime || manualBookingForm.assignedUserIds.length === 0) {
+      setManualBookingErrors(['日時と担当者を選択してください'])
+      return
+    }
+
+    setCheckingAvailability(true)
+    setManualBookingErrors([])
+
+    try {
+      const startTime = new Date(manualBookingForm.startTime)
+      const endTime = new Date(startTime.getTime() + 60 * 60000) // 1時間後
+
+      const response = await fetch('/api/bookings/manual', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          userIds: manualBookingForm.assignedUserIds,
+        }),
+      })
+
+      const data = await response.json()
+      
+      if (response.ok) {
+        setAvailabilityResults(data.results)
+        if (!data.allAvailable) {
+          const unavailable = data.results.filter((r: any) => !r.available)
+          setManualBookingErrors(unavailable.map((r: any) => `${r.userName}: ${r.reason}`))
+        }
+      } else {
+        setManualBookingErrors([data.error])
+      }
+    } catch (error) {
+      console.error('Failed to check availability:', error)
+      setManualBookingErrors(['空き時間の確認に失敗しました'])
+    } finally {
+      setCheckingAvailability(false)
+    }
+  }
+
+  // 手動予約を作成
+  const handleCreateManualBooking = async () => {
+    // バリデーション
+    const errors: string[] = []
+    if (!manualBookingForm.startTime) errors.push('日時は必須です')
+    if (!manualBookingForm.guestName) errors.push('面談相手の氏名は必須です')
+    if (!manualBookingForm.guestEmail) errors.push('メールアドレスは必須です')
+    if (!manualBookingForm.meetingType) errors.push('面談形式は必須です')
+    if (manualBookingForm.assignedUserIds.length === 0) errors.push('担当者を1人以上選択してください')
+
+    if (errors.length > 0) {
+      setManualBookingErrors(errors)
+      return
+    }
+
+    setCreatingBooking(true)
+    setManualBookingErrors([])
+
+    try {
+      const startTime = new Date(manualBookingForm.startTime)
+      const endTime = new Date(startTime.getTime() + 60 * 60000) // 1時間後
+
+      const response = await fetch('/api/bookings/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          guestName: manualBookingForm.guestName,
+          guestEmail: manualBookingForm.guestEmail,
+          guestPhone: manualBookingForm.guestPhone,
+          meetingType: manualBookingForm.meetingType,
+          location: manualBookingForm.location,
+          notes: manualBookingForm.notes,
+          assignedUserIds: manualBookingForm.assignedUserIds,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (response.ok) {
+        alert('予約を作成しました。担当者とゲストにメールが送信されます。')
+        setShowManualBookingModal(false)
+        fetchBookings()
+      } else {
+        if (data.unavailableUsers) {
+          setManualBookingErrors([
+            data.error,
+            ...data.unavailableUsers.map((u: any) => `${u.userName}: ${u.reason}`)
+          ])
+        } else {
+          setManualBookingErrors([data.error || '予約の作成に失敗しました'])
+        }
+      }
+    } catch (error) {
+      console.error('Failed to create manual booking:', error)
+      setManualBookingErrors(['予約の作成に失敗しました'])
+    } finally {
+      setCreatingBooking(false)
+    }
+  }
+
+  // 担当者選択のトグル
+  const toggleUserSelection = (userId: string) => {
+    setManualBookingForm(prev => ({
+      ...prev,
+      assignedUserIds: prev.assignedUserIds.includes(userId)
+        ? prev.assignedUserIds.filter(id => id !== userId)
+        : [...prev.assignedUserIds, userId]
+    }))
+    // 選択が変わったら空き時間結果をリセット
+    setAvailabilityResults([])
+  }
+
   return (
     <div className="min-h-screen">
       {/* ページヘッダー */}
@@ -164,16 +320,27 @@ export default function BookingsPage() {
             </h1>
             <p className="text-gray-500 text-sm">すべての予約を管理</p>
           </div>
-          <button
-            onClick={handleExportCSV}
-            disabled={bookings.length === 0}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2 text-sm"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            CSV出力
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={openManualBookingModal}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2 text-sm"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              手動で予約を追加
+            </button>
+            <button
+              onClick={handleExportCSV}
+              disabled={bookings.length === 0}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2 text-sm"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              CSV出力
+            </button>
+          </div>
         </div>
       </div>
 
@@ -586,6 +753,227 @@ export default function BookingsPage() {
                     )}
                   </>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 手動予約モーダル */}
+      {showManualBookingModal && (
+        <div className="fixed z-[300] inset-0 overflow-y-auto">
+          <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div
+              className="fixed inset-0 bg-black/70 transition-opacity z-[300]"
+              onClick={() => setShowManualBookingModal(false)}
+            />
+
+            <div className="relative z-[301] inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-2xl sm:w-full border border-gray-200">
+              <div className="bg-white px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-normal text-gray-900">
+                  手動で予約を追加
+                </h3>
+              </div>
+              <div className="px-6 py-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                {/* エラー表示 */}
+                {manualBookingErrors.length > 0 && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <ul className="text-sm text-red-600 space-y-1">
+                      {manualBookingErrors.map((error, idx) => (
+                        <li key={idx}>{error}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* 日時 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    日時 <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={manualBookingForm.startTime}
+                    onChange={(e) => {
+                      setManualBookingForm({ ...manualBookingForm, startTime: e.target.value })
+                      setAvailabilityResults([])
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">※ 予約時間は1時間です</p>
+                </div>
+
+                {/* 面談相手の氏名 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    面談相手の氏名 <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={manualBookingForm.guestName}
+                    onChange={(e) => setManualBookingForm({ ...manualBookingForm, guestName: e.target.value })}
+                    placeholder="山田 太郎"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                </div>
+
+                {/* メールアドレス */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    メールアドレス <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={manualBookingForm.guestEmail}
+                    onChange={(e) => setManualBookingForm({ ...manualBookingForm, guestEmail: e.target.value })}
+                    placeholder="example@email.com"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                </div>
+
+                {/* 電話番号 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    電話番号
+                  </label>
+                  <input
+                    type="tel"
+                    value={manualBookingForm.guestPhone}
+                    onChange={(e) => setManualBookingForm({ ...manualBookingForm, guestPhone: e.target.value })}
+                    placeholder="090-1234-5678"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                </div>
+
+                {/* 面談形式 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    面談形式 <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={manualBookingForm.meetingType}
+                    onChange={(e) => setManualBookingForm({ ...manualBookingForm, meetingType: e.target.value as 'ONLINE' | 'OFFLINE' })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  >
+                    <option value="ONLINE">オンライン</option>
+                    <option value="OFFLINE">対面</option>
+                  </select>
+                </div>
+
+                {/* 対面の場合の場所 */}
+                {manualBookingForm.meetingType === 'OFFLINE' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      場所
+                    </label>
+                    <input
+                      type="text"
+                      value={manualBookingForm.location}
+                      onChange={(e) => setManualBookingForm({ ...manualBookingForm, location: e.target.value })}
+                      placeholder="東京都渋谷区..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    />
+                  </div>
+                )}
+
+                {/* 担当者選択 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    担当者 <span className="text-red-500">*</span>
+                    <span className="text-xs text-gray-500 ml-2">（複数選択可）</span>
+                  </label>
+                  <div className="border border-gray-300 rounded-lg max-h-48 overflow-y-auto">
+                    {companyMembers.length === 0 ? (
+                      <p className="p-4 text-sm text-gray-500">メンバーを読み込み中...</p>
+                    ) : (
+                      companyMembers.map((member) => {
+                        const isSelected = manualBookingForm.assignedUserIds.includes(member.id)
+                        const availability = availabilityResults.find(r => r.userId === member.id)
+                        
+                        return (
+                          <div
+                            key={member.id}
+                            onClick={() => toggleUserSelection(member.id)}
+                            className={`flex items-center gap-3 p-3 cursor-pointer hover:bg-gray-50 border-b border-gray-100 last:border-b-0 ${
+                              isSelected ? 'bg-blue-50' : ''
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {}}
+                              className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                            />
+                            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-sm font-medium text-blue-700">
+                              {member.name?.charAt(0) || '?'}
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-sm text-gray-900">{member.name}</p>
+                              <p className="text-xs text-gray-500">{member.email}</p>
+                            </div>
+                            {availability && (
+                              <span className={`text-xs px-2 py-1 rounded ${
+                                availability.available
+                                  ? 'bg-green-100 text-green-700'
+                                  : 'bg-red-100 text-red-700'
+                              }`}>
+                                {availability.available ? '空き' : '予定あり'}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    選択中: {manualBookingForm.assignedUserIds.length}名
+                  </p>
+                </div>
+
+                {/* 空き時間チェックボタン */}
+                <div>
+                  <button
+                    onClick={checkAvailability}
+                    disabled={checkingAvailability || !manualBookingForm.startTime || manualBookingForm.assignedUserIds.length === 0}
+                    className="w-full px-4 py-2 border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 disabled:border-gray-300 disabled:text-gray-400 disabled:hover:bg-white text-sm"
+                  >
+                    {checkingAvailability ? '確認中...' : '空き時間を確認'}
+                  </button>
+                  {availabilityResults.length > 0 && availabilityResults.every(r => r.available) && (
+                    <p className="text-sm text-green-600 mt-2 text-center">
+                      ✓ 全員の予定が空いています
+                    </p>
+                  )}
+                </div>
+
+                {/* メモ */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    メモ
+                  </label>
+                  <textarea
+                    value={manualBookingForm.notes}
+                    onChange={(e) => setManualBookingForm({ ...manualBookingForm, notes: e.target.value })}
+                    rows={3}
+                    placeholder="面談に関するメモ..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                </div>
+              </div>
+              <div className="bg-gray-50 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <button
+                  onClick={() => setShowManualBookingModal(false)}
+                  className="px-4 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm hover:bg-gray-50"
+                >
+                  キャンセル
+                </button>
+                <button
+                  onClick={handleCreateManualBooking}
+                  disabled={creatingBooking}
+                  className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm hover:bg-green-700 disabled:bg-gray-400"
+                >
+                  {creatingBooking ? '作成中...' : '予約を作成'}
+                </button>
               </div>
             </div>
           </div>

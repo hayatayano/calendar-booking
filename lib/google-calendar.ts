@@ -284,3 +284,147 @@ export async function deleteCalendarEvent(userId: string, eventId: string) {
     sendUpdates: 'all',
   })
 }
+
+/**
+ * 指定した時間帯がユーザーにとって予約可能かチェック
+ * @returns { available: boolean, reason?: string }
+ */
+export async function checkTimeSlotAvailability(
+  userId: string,
+  startTime: Date,
+  endTime: Date
+): Promise<{ available: boolean; reason?: string }> {
+  try {
+    const calendar = await getGoogleCalendarClient(userId)
+    
+    // Googleカレンダーから指定時間帯のイベントを取得
+    const response = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin: startTime.toISOString(),
+      timeMax: endTime.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime',
+    })
+
+    // 既存の予定があるかチェック
+    const busySlots = response.data.items || []
+    if (busySlots.length > 0) {
+      return {
+        available: false,
+        reason: `既存の予定があります: ${busySlots[0].summary || '予定'}`,
+      }
+    }
+
+    // 稼働時間をチェック
+    const dayOfWeek = startTime.getDay()
+    const workingHours = await prisma.workingHours.findFirst({
+      where: {
+        userId,
+        dayOfWeek,
+        isAvailable: true,
+      },
+    })
+
+    // 稼働時間が設定されていない場合はデフォルト（9:00-18:00）を使用
+    const startHour = workingHours ? parseInt(workingHours.startTime.split(':')[0]) : 9
+    const startMinute = workingHours ? parseInt(workingHours.startTime.split(':')[1]) : 0
+    const endHour = workingHours ? parseInt(workingHours.endTime.split(':')[0]) : 18
+    const endMinute = workingHours ? parseInt(workingHours.endTime.split(':')[1]) : 0
+
+    // 日本時間での時間を取得
+    const startTimeJST = new Date(startTime.getTime() + 9 * 60 * 60 * 1000)
+    const endTimeJST = new Date(endTime.getTime() + 9 * 60 * 60 * 1000)
+    
+    const slotStartHour = startTimeJST.getUTCHours()
+    const slotStartMinute = startTimeJST.getUTCMinutes()
+    const slotEndHour = endTimeJST.getUTCHours()
+    const slotEndMinute = endTimeJST.getUTCMinutes()
+
+    // 稼働時間外かチェック
+    const slotStartMinutes = slotStartHour * 60 + slotStartMinute
+    const slotEndMinutes = slotEndHour * 60 + slotEndMinute
+    const workStartMinutes = startHour * 60 + startMinute
+    const workEndMinutes = endHour * 60 + endMinute
+
+    if (slotStartMinutes < workStartMinutes || slotEndMinutes > workEndMinutes) {
+      return {
+        available: false,
+        reason: `稼働時間外です（稼働時間: ${workingHours?.startTime || '09:00'} - ${workingHours?.endTime || '18:00'}）`,
+      }
+    }
+
+    // 稼働日かチェック
+    if (workingHours && !workingHours.isAvailable) {
+      return {
+        available: false,
+        reason: 'この曜日は稼働日ではありません',
+      }
+    }
+
+    // 休暇チェック
+    const JST_OFFSET = 9 * 60 * 60 * 1000
+    const dateJST = new Date(startTime.getTime() + JST_OFFSET)
+    const startOfDayJST = new Date(Date.UTC(
+      dateJST.getUTCFullYear(),
+      dateJST.getUTCMonth(),
+      dateJST.getUTCDate(),
+      0, 0, 0, 0
+    ) - JST_OFFSET)
+    const endOfDayJST = new Date(Date.UTC(
+      dateJST.getUTCFullYear(),
+      dateJST.getUTCMonth(),
+      dateJST.getUTCDate(),
+      23, 59, 59, 999
+    ) - JST_OFFSET)
+
+    const holiday = await prisma.holiday.findFirst({
+      where: {
+        userId,
+        date: {
+          gte: startOfDayJST,
+          lte: endOfDayJST,
+        },
+      },
+    })
+
+    if (holiday) {
+      return {
+        available: false,
+        reason: `休暇日です${holiday.reason ? `: ${holiday.reason}` : ''}`,
+      }
+    }
+
+    return { available: true }
+  } catch (error) {
+    console.error('Failed to check time slot availability:', error)
+    return {
+      available: false,
+      reason: 'カレンダーの確認に失敗しました',
+    }
+  }
+}
+
+/**
+ * 複数ユーザーの空き時間をチェック
+ */
+export async function checkMultipleUsersAvailability(
+  userIds: string[],
+  startTime: Date,
+  endTime: Date
+): Promise<{ userId: string; available: boolean; reason?: string; userName?: string }[]> {
+  const results = await Promise.all(
+    userIds.map(async (userId) => {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+      })
+      const result = await checkTimeSlotAvailability(userId, startTime, endTime)
+      return {
+        userId,
+        userName: user?.name,
+        ...result,
+      }
+    })
+  )
+  return results
+}
