@@ -55,18 +55,25 @@ export async function getAvailableSlots(
 ) {
   const calendar = await getGoogleCalendarClient(userId)
   
-  // その日の開始と終了時刻
-  const startOfDay = new Date(date)
-  startOfDay.setHours(0, 0, 0, 0)
+  // 日本時間のタイムゾーンオフセット（+9時間）
+  const JST_OFFSET = 9 * 60 * 60 * 1000
   
-  const endOfDay = new Date(date)
-  endOfDay.setHours(23, 59, 59, 999)
+  // 入力された日付を日本時間として解釈
+  // date は YYYY-MM-DD 形式の文字列からパースされた Date オブジェクト
+  const year = date.getUTCFullYear()
+  const month = date.getUTCMonth()
+  const day = date.getUTCDate()
+  
+  // その日の開始と終了時刻（日本時間）
+  // 日本時間の0:00は、UTCでは前日の15:00
+  const startOfDayJST = new Date(Date.UTC(year, month, day, 0, 0, 0, 0) - JST_OFFSET)
+  const endOfDayJST = new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - JST_OFFSET)
 
   // Googleカレンダーからイベントを取得
   const response = await calendar.events.list({
     calendarId: 'primary',
-    timeMin: startOfDay.toISOString(),
-    timeMax: endOfDay.toISOString(),
+    timeMin: startOfDayJST.toISOString(),
+    timeMax: endOfDayJST.toISOString(),
     singleEvents: true,
     orderBy: 'startTime',
   })
@@ -105,8 +112,8 @@ export async function getAvailableSlots(
     where: {
       userId,
       date: {
-        gte: startOfDay,
-        lte: endOfDay,
+        gte: startOfDayJST,
+        lte: endOfDayJST,
       },
     },
   })
@@ -115,15 +122,13 @@ export async function getAvailableSlots(
     return [] // 休暇日
   }
 
-  // 稼働時間から空き時間を計算
+  // 稼働時間から空き時間を計算（日本時間）
   const [startHour, startMinute] = workingHours.startTime.split(':').map(Number)
   const [endHour, endMinute] = workingHours.endTime.split(':').map(Number)
 
-  const workStart = new Date(date)
-  workStart.setHours(startHour, startMinute, 0, 0)
-
-  const workEnd = new Date(date)
-  workEnd.setHours(endHour, endMinute, 0, 0)
+  // 日本時間での稼働開始・終了時刻をUTCに変換
+  const workStart = new Date(Date.UTC(year, month, day, startHour, startMinute, 0, 0) - JST_OFFSET)
+  const workEnd = new Date(Date.UTC(year, month, day, endHour, endMinute, 0, 0) - JST_OFFSET)
 
   // 空き時間スロットを生成（1時間間隔で固定）
   const availableSlots: { start: Date; end: Date }[] = []
