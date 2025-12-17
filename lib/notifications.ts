@@ -887,18 +887,472 @@ export async function sendNotification(
  * 通知ログを記録
  */
 async function logNotification(data: {
-  bookingId: string
-  userId: string
+  bookingId?: string
+  userId?: string
+  companyId?: string
   type: NotificationType
+  category?: string
   method: NotificationMethod
   recipient: string
+  subject?: string
   status: NotificationStatus
   errorMessage?: string
 }) {
+  // カテゴリが指定されていない場合、typeから推測
+  const category = data.category || getCategoryFromType(data.type)
+
   await prisma.notificationLog.create({
     data: {
-      ...data,
+      bookingId: data.bookingId,
+      userId: data.userId,
+      companyId: data.companyId,
+      type: data.type,
+      category,
+      method: data.method,
+      recipient: data.recipient,
+      subject: data.subject,
+      status: data.status,
+      errorMessage: data.errorMessage,
+      lastAttemptAt: new Date(),
       sentAt: data.status === 'SENT' ? new Date() : null,
     },
+  })
+}
+
+/**
+ * 通知タイプからカテゴリを取得
+ */
+function getCategoryFromType(type: NotificationType): string {
+  switch (type) {
+    case 'BOOKING_CREATED':
+    case 'BOOKING_CANCELLED':
+    case 'BOOKING_REMINDER':
+    case 'BOOKING_UPDATED':
+      return 'booking'
+    case 'INVITATION':
+      return 'invitation'
+    case 'SYSTEM':
+      return 'system'
+    default:
+      return 'other'
+  }
+}
+
+/**
+ * 通知ログを更新（再送時）
+ */
+export async function updateNotificationLog(
+  id: string,
+  data: {
+    status: NotificationStatus
+    errorMessage?: string | null
+  }
+) {
+  const now = new Date()
+  await prisma.notificationLog.update({
+    where: { id },
+    data: {
+      status: data.status,
+      errorMessage: data.errorMessage,
+      lastAttemptAt: now,
+      sentAt: data.status === 'SENT' ? now : undefined,
+      retryCount: { increment: 1 },
+    },
+  })
+}
+
+/**
+ * 失敗した通知を再送
+ */
+export async function retryNotification(notificationId: string): Promise<{ success: boolean; error?: string }> {
+  const notification = await prisma.notificationLog.findUnique({
+    where: { id: notificationId },
+    include: {
+      booking: {
+        include: {
+          bookingLink: true,
+          user: {
+            include: {
+              company: true,
+            },
+          },
+        },
+      },
+      user: {
+        include: {
+          company: true,
+        },
+      },
+    },
+  })
+
+  if (!notification) {
+    return { success: false, error: '通知が見つかりません' }
+  }
+
+  if (notification.retryCount >= notification.maxRetries) {
+    return { success: false, error: '最大再送回数に達しています' }
+  }
+
+  // 再送中ステータスに更新
+  await prisma.notificationLog.update({
+    where: { id: notificationId },
+    data: { status: 'RETRYING' },
+  })
+
+  try {
+    if (notification.method === 'EMAIL') {
+      await retryEmailNotification(notification)
+    } else if (notification.method === 'SMS') {
+      await retrySmsNotification(notification)
+    }
+
+    // 成功時の更新
+    await updateNotificationLog(notificationId, { status: 'SENT', errorMessage: null })
+    return { success: true }
+  } catch (error) {
+    // 失敗時の更新
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    await updateNotificationLog(notificationId, { status: 'FAILED', errorMessage })
+    return { success: false, error: errorMessage }
+  }
+}
+
+/**
+ * メール通知の再送処理
+ */
+async function retryEmailNotification(notification: any) {
+  if (!notification.booking) {
+    throw new Error('予約情報が見つかりません')
+  }
+
+  const { booking } = notification
+
+  switch (notification.type) {
+    case 'BOOKING_CREATED':
+      if (notification.recipient === booking.guestEmail) {
+        await sendBookingConfirmationEmailDirect(
+          booking,
+          booking.bookingLink,
+          booking.user
+        )
+      } else {
+        await sendStaffBookingNotificationEmailDirect(
+          booking,
+          booking.bookingLink,
+          booking.user
+        )
+      }
+      break
+    case 'BOOKING_CANCELLED':
+      await sendCancellationEmailDirect(
+        booking,
+        booking.bookingLink,
+        booking.user
+      )
+      break
+    case 'BOOKING_REMINDER':
+      await sendReminderEmailDirect(
+        booking,
+        booking.bookingLink,
+        booking.user
+      )
+      break
+    case 'BOOKING_UPDATED':
+      // 変更通知の再送（変更内容は不明なため、現在の情報で送信）
+      await sendBookingUpdateEmailDirect(
+        booking,
+        booking.bookingLink,
+        booking.user
+      )
+      break
+    default:
+      throw new Error(`未対応の通知タイプ: ${notification.type}`)
+  }
+}
+
+/**
+ * SMS通知の再送処理
+ */
+async function retrySmsNotification(notification: any) {
+  if (!notification.booking) {
+    throw new Error('予約情報が見つかりません')
+  }
+
+  const { booking } = notification
+  const companyName = booking.user.company?.name
+
+  switch (notification.type) {
+    case 'BOOKING_CREATED':
+      if (notification.recipient === booking.guestPhone) {
+        await sendBookingConfirmationSmsDirect(
+          booking,
+          booking.bookingLink,
+          companyName
+        )
+      } else {
+        await sendStaffBookingNotificationSmsDirect(
+          booking,
+          booking.bookingLink,
+          booking.user
+        )
+      }
+      break
+    default:
+      throw new Error(`未対応の通知タイプ: ${notification.type}`)
+  }
+}
+
+/**
+ * 直接メール送信（ログ記録なし、再送用）
+ */
+async function sendBookingConfirmationEmailDirect(
+  booking: any,
+  bookingLink: any,
+  user: any
+) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const endTimeFormatted = booking.endTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const meetingDetails = booking.meetingType === 'ONLINE'
+    ? `オンライン（Google Meet）\nURL: ${booking.meetingUrl || '後ほど送信されます'}`
+    : `対面\n場所: ${booking.location || '調整中'}`
+
+  const emailContent = `
+    ${booking.guestName} 様
+
+    ${bookingLink.title}の予約が確定しました。
+
+    【予約内容】
+    日時: ${startTimeFormatted} - ${endTimeFormatted}
+    担当者: ${user.name}
+    ${meetingDetails}
+
+    予約の変更やキャンセルが必要な場合は、以下のリンクからお願いします。
+    ${process.env.APP_URL}/booking/${booking.id}
+
+    ご不明な点がございましたら、${user.email} までお問い合わせください。
+
+    よろしくお願いいたします。
+  `
+
+  await resend.emails.send({
+    from: process.env.RESEND_FROM_EMAIL!,
+    to: booking.guestEmail,
+    subject: `【確認】${bookingLink.title}の予約が完了しました`,
+    text: emailContent,
+  })
+}
+
+async function sendStaffBookingNotificationEmailDirect(booking: any, bookingLink: any, staff: any) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const endTimeFormatted = booking.endTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const meetingDetails = booking.meetingType === 'ONLINE'
+    ? `オンライン（Google Meet）\nURL: ${booking.meetingUrl || '後ほど送信されます'}`
+    : `対面\n場所: ${booking.location || '調整中'}`
+
+  const emailContent = `
+    ${staff.name} 様
+
+    新しい予約が入りました。
+
+    【予約内容】
+    予約タイプ: ${bookingLink.title}
+    日時: ${startTimeFormatted} - ${endTimeFormatted}
+    ${meetingDetails}
+
+    【予約者情報】
+    名前: ${booking.guestName}
+    メール: ${booking.guestEmail}
+    電話番号: ${booking.guestPhone}
+
+    ${booking.notes ? `【メモ】\n${booking.notes}` : ''}
+
+    詳細: ${process.env.APP_URL}/home/bookings
+  `
+
+  await resend.emails.send({
+    from: process.env.RESEND_FROM_EMAIL!,
+    to: staff.email,
+    subject: `【新規予約】${bookingLink.title} - ${booking.guestName}様`,
+    text: emailContent,
+  })
+}
+
+async function sendCancellationEmailDirect(booking: any, bookingLink: any, user: any) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const emailContent = `
+    ${booking.guestName} 様
+
+    ${bookingLink.title}の予約がキャンセルされました。
+
+    【キャンセル内容】
+    日時: ${startTimeFormatted}
+    担当者: ${user.name}
+    ${booking.cancelReason ? `理由: ${booking.cancelReason}` : ''}
+
+    再度予約が必要な場合は、お手数ですが改めてご予約ください。
+
+    ご不明な点がございましたら、${user.email} までお問い合わせください。
+  `
+
+  await resend.emails.send({
+    from: process.env.RESEND_FROM_EMAIL!,
+    to: booking.guestEmail,
+    subject: `【キャンセル】${bookingLink.title}の予約がキャンセルされました`,
+    text: emailContent,
+  })
+}
+
+async function sendReminderEmailDirect(booking: any, bookingLink: any, user: any) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const meetingDetails = booking.meetingType === 'ONLINE'
+    ? `オンライン（Google Meet）\nURL: ${booking.meetingUrl}`
+    : `対面\n場所: ${booking.location}`
+
+  const emailContent = `
+    ${booking.guestName} 様
+
+    ${bookingLink.title}のリマインダーです。
+
+    【予約内容】
+    日時: ${startTimeFormatted}
+    担当者: ${user.name}
+    ${meetingDetails}
+
+    お忘れなきようお願いいたします。
+  `
+
+  await resend.emails.send({
+    from: process.env.RESEND_FROM_EMAIL!,
+    to: booking.guestEmail,
+    subject: `【リマインダー】${bookingLink.title}のお知らせ`,
+    text: emailContent,
+  })
+}
+
+async function sendBookingUpdateEmailDirect(booking: any, bookingLink: any, user: any) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const endTimeFormatted = booking.endTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const meetingDetails = booking.meetingType === 'ONLINE'
+    ? `オンライン（Google Meet）\nURL: ${booking.meetingUrl || '後ほど送信されます'}`
+    : `対面\n場所: ${booking.location || '調整中'}`
+
+  const emailContent = `
+    ${booking.guestName} 様
+
+    ${bookingLink.title}の予約内容が変更されました。
+
+    【予約内容】
+    日時: ${startTimeFormatted} - ${endTimeFormatted}
+    担当者: ${user.name}
+    ${meetingDetails}
+
+    ご不明な点がございましたら、${user.email} までお問い合わせください。
+
+    よろしくお願いいたします。
+  `
+
+  await resend.emails.send({
+    from: process.env.RESEND_FROM_EMAIL!,
+    to: booking.guestEmail,
+    subject: `【変更】${bookingLink.title}の予約内容が変更されました`,
+    text: emailContent,
+  })
+}
+
+async function sendBookingConfirmationSmsDirect(booking: any, bookingLink: any, companyName?: string) {
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const senderName = companyName || process.env.TWILIO_SENDER_NAME || 'newgate'
+  const message = `【${senderName}】${bookingLink.title}の予約が確定しました。日時: ${startTimeFormatted} 詳細: ${process.env.APP_URL}/booking/${booking.id}`
+
+  await twilioClient.messages.create({
+    body: message,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    to: booking.guestPhone,
+  })
+}
+
+async function sendStaffBookingNotificationSmsDirect(booking: any, bookingLink: any, staff: any) {
+  if (!staff.phone) {
+    throw new Error('担当者の電話番号が設定されていません')
+  }
+
+  const startTimeFormatted = booking.startTime.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  const senderName = staff.company?.name || process.env.TWILIO_SENDER_NAME || 'newgate'
+  const message = `【${senderName}】新規予約が入りました。${bookingLink.title} / ${booking.guestName}様 / ${startTimeFormatted} 詳細: ${process.env.APP_URL}/home/bookings`
+
+  await twilioClient.messages.create({
+    body: message,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    to: staff.phone,
   })
 }

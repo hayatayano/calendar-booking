@@ -335,22 +335,32 @@ model Holiday {
 // 通知ログ
 model NotificationLog {
   id              String            @id @default(cuid())
-  bookingId       String
-  userId          String
+  bookingId       String?           // 予約関連の通知（任意）
+  userId          String?           // 担当者（任意）
+  companyId       String?           // 会社ID（任意）
   type            NotificationType
+  category        String            // カテゴリ（booking, invitation, reminder等）
   method          NotificationMethod
   recipient       String            // 送信先（メールアドレスまたは電話番号）
+  subject         String?           // メールの件名
   status          NotificationStatus
   errorMessage    String?           @db.Text
+  retryCount      Int               @default(0) // 再送回数
+  maxRetries      Int               @default(3) // 最大再送回数
+  lastAttemptAt   DateTime?         // 最後の送信試行日時
   sentAt          DateTime?
   createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
-  booking         Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  user            User              @relation(fields: [userId], references: [id])
+  booking         Booking?          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user            User?             @relation(fields: [userId], references: [id])
 
   @@index([bookingId])
   @@index([userId])
+  @@index([companyId])
   @@index([status])
+  @@index([category])
+  @@index([createdAt])
 }
 
 enum NotificationType {
@@ -358,12 +368,15 @@ enum NotificationType {
   BOOKING_CANCELLED
   BOOKING_REMINDER
   BOOKING_UPDATED
+  INVITATION
+  SYSTEM
 }
 
 enum NotificationStatus {
   PENDING
   SENT
   FAILED
+  RETRYING
 }
 
 // 担当者自動割り当てルール
