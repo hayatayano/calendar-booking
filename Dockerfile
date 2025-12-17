@@ -63,8 +63,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 
-# Prismaスキーマをコピー（マイグレーション用）
+# Prismaスキーマとマイグレーションをコピー
 COPY --from=builder /app/prisma ./prisma
+
+# 起動スクリプトをコピー
+COPY --from=builder --chown=nextjs:nodejs /app/start.sh ./start.sh
+RUN chmod +x ./start.sh
 
 USER nextjs
 
@@ -73,5 +77,5 @@ EXPOSE 8080
 ENV PORT=8080
 ENV HOSTNAME="0.0.0.0"
 
-# アプリケーションを起動
-CMD ["node", "server.js"]
+# 起動時にマイグレーションを実行してからアプリを起動
+CMD ["./start.sh"]
